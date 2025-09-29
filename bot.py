@@ -1,155 +1,17 @@
-# bot_auto_resolve.py
-"""
-DhanHQ -> Telegram LTP Bot (with Security IDs Reference integration)
-----------------------------------------------------------
-- Uses dhanhq_security_ids.py reference dicts for popular indices & stocks
-- Falls back to scrip-master auto-resolve if symbol not in reference
-"""
-
-import os, time, requests, sys, logging
+# bot.py
+import logging
 from dotenv import load_dotenv
-from urllib.parse import urljoin
-from datetime import datetime, timezone, timedelta
+import bot_auto_resolve
 
-# 👉 Import your reference file
-try:
-    from dhanhq_security_ids import NIFTY50_STOCKS, INDICES_NSE, INDICES_BSE
-except ImportError:
-    print("⚠️ dhanhq_security_ids.py not found. Please keep it in the same folder.")
-    sys.exit(1)
-
-# --- Config ---
-load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("dhan-telegram-bot")
-
-DHAN_TOKEN = os.getenv("DHAN_TOKEN")
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
-DHAN_API_BASE = os.getenv("DHAN_API_BASE", "https://api.dhan.co/v2")
-
-SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "").split(",") if s.strip()]
-
-if not DHAN_TOKEN or not DHAN_CLIENT_ID:
-    log.error("Missing DHAN_TOKEN or DHAN_CLIENT_ID in .env")
-    sys.exit(1)
-
-# --- Helper maps ---
-SEG_MAP = {
-    "NSE_EQ": "NSE_EQ",
-    "BSE_EQ": "BSE_EQ",
-    "NSE_INDEX": "NSE_INDEX",
-    "BSE_INDEX": "BSE_INDEX",
-}
-
-def now_ist_str():
-    ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    return ist.strftime("%Y-%m-%d %H:%M:%S IST")
-
-# --- Telegram send ---
-def send_telegram(text: str):
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        log.warning("Telegram creds missing, skipping message.")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-        r = requests.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        log.error(f"Telegram send failed: {e}")
-
-# --- Resolve using reference ---
-def resolve_from_reference(symbol: str):
-    """
-    Try to resolve symbol using dhanhq_security_ids reference dicts.
-    Returns tuple (seg, sid, display_name) or None
-    """
-    sym = symbol.upper()
-
-    if sym in INDICES_NSE:
-        return ("NSE_INDEX", INDICES_NSE[sym], sym)
-    if sym in INDICES_BSE:
-        return ("BSE_INDEX", INDICES_BSE[sym], sym)
-    if sym in NIFTY50_STOCKS:
-        return ("NSE_EQ", NIFTY50_STOCKS[sym], sym)
-
-    return None
-
-# --- Call LTP ---
-def call_ltp(payload):
-    url = urljoin(DHAN_API_BASE + "/", "marketfeed/ltp")
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "access-token": DHAN_TOKEN,
-        "client-id": DHAN_CLIENT_ID,
-    }
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.error(f"LTP call failed: {e}")
-        return {}
-
-# --- Main ---
-def main():
-    if not SYMBOLS:
-        log.error("No SYMBOLS in .env file")
-        sys.exit(1)
-
-    payload = {}
-    display_map = {}  # (seg,sid) -> name
-
-    for s in SYMBOLS:
-        ref = resolve_from_reference(s)
-        if ref:
-            seg, sid, name = ref
-            payload.setdefault(seg, []).append(int(sid))
-            display_map[(seg, str(sid))] = name
-            log.info(f"Resolved {s} -> {seg}:{sid}")
-        else:
-            log.warning(f"{s} not in reference dicts. Skipping.")
-
-    if not payload:
-        log.error("No valid symbols resolved. Exiting.")
-        sys.exit(1)
-
-    log.info(f"Final Payload: {payload}")
-
-    last_prices = {}
-
-    while True:
-        try:
-            data = call_ltp(payload).get("data", {})
-            msgs = []
-            for seg, mapping in data.items():
-                for sid, info in mapping.items():
-                    lp = info.get("last_price")
-                    display = display_map.get((seg, str(sid)), f"{seg}:{sid}")
-                    prev = last_prices.get((seg, sid))
-                    change = ""
-                    if lp is not None and prev is not None:
-                        diff = float(lp) - float(prev)
-                        pct = (diff / float(prev)) * 100 if float(prev) != 0 else 0
-                        change = f" ({diff:+.2f}, {pct:+.2f}%)"
-                    if lp is not None:
-                        msgs.append(f"<b>{display} ({seg})</b>: {lp}{change}")
-                        last_prices[(seg, sid)] = lp
-            if msgs:
-                text = f"<b>LTP Update • {now_ist_str()}</b>\n" + "\n".join(msgs)
-                send_telegram(text)
-                log.info("Sent update with %d items", len(msgs))
-            time.sleep(POLL_INTERVAL)
-        except KeyboardInterrupt:
-            log.info("Stopped by user")
-            break
-        except Exception as e:
-            log.error(f"Loop error: {e}")
-            time.sleep(5)
+log = logging.getLogger("bot.py")
 
 if __name__ == "__main__":
-    main()
+    load_dotenv()
+    log.info("Starting DhanHQ LTP Bot...")
+    try:
+        bot_auto_resolve.main()
+    except KeyboardInterrupt:
+        log.info("Bot stopped by user.")
+    except Exception as e:
+        log.error(f"Fatal error: {e}")
