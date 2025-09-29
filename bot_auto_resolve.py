@@ -32,6 +32,7 @@ if not DHAN_TOKEN or not DHAN_CLIENT_ID:
 # Aliases
 ALIASES = {
     "BANKNIFTY": "NIFTY BANK",
+    "NIFTYBANK": "NIFTY BANK",
     "CNX NIFTY": "NIFTY 50",
 }
 
@@ -133,7 +134,10 @@ def main():
                 if not info or "last_price" not in info:
                     ohlc_data = call_ohlc({seg: [int(sid)]}).get("data", {})
                     if seg in ohlc_data and sid in ohlc_data[seg]:
-                        lp = ohlc_data[seg][sid].get("last_price")
+                        lp = (
+                            ohlc_data[seg][sid].get("last_price")
+                            or ohlc_data[seg][sid].get("close")
+                        )
                         if lp:
                             if seg not in data:
                                 data[seg] = {}
