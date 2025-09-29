@@ -1,10 +1,14 @@
 # dhanhq_security_ids.py
-# DhanHQ Security IDs Reference (compact — Sep 2025)
+# DhanHQ Security IDs Reference (Updated Sep 2025)
 
+# ============================================
 # MAJOR INDICES - NSE
+# ============================================
+
 INDICES_NSE = {
     "NIFTY 50": "13",
     "NIFTY BANK": "25",
+    "BANKNIFTY": "25",   # alias
     "NIFTY IT": "369",
     "NIFTY PHARMA": "1045",
     "NIFTY AUTO": "1108",
@@ -40,7 +44,10 @@ INDICES_NSE = {
     "NIFTY MOBILITY": "1095",
 }
 
+# ============================================
 # MAJOR INDICES - BSE
+# ============================================
+
 INDICES_BSE = {
     "SENSEX": "51",
     "BSE 100": "304",
@@ -58,47 +65,65 @@ INDICES_BSE = {
     "BSE CONSUMER DURABLES": "317",
 }
 
-# NIFTY 50 POPULAR STOCKS
+# ============================================
+# NIFTY 50 STOCKS
+# ============================================
+
 NIFTY50_STOCKS = {
+    # Banking
     "HDFCBANK": "1333",
     "ICICIBANK": "4963",
     "KOTAKBANK": "1922",
     "AXISBANK": "5900",
     "SBIN": "3045",
+    "INDUSINDBK": "5258",
     "BAJFINANCE": "317",
     "BAJAJFINSV": "16675",
+
+    # IT
     "TCS": "11536",
     "INFY": "1594",
     "WIPRO": "3787",
     "HCLTECH": "7229",
     "TECHM": "13538",
-    "LTI": "17818",
+
+    # Auto
     "MARUTI": "10999",
     "M&M": "2031",
     "TATAMOTORS": "3456",
     "BAJAJ-AUTO": "16669",
     "EICHERMOT": "910",
+    "HEROMOTOCO": "1348",
+
+    # FMCG
     "HINDUNILVR": "1394",
     "ITC": "1660",
     "NESTLEIND": "17963",
     "BRITANNIA": "547",
     "DABUR": "2732",
+
+    # Pharma
     "SUNPHARMA": "3351",
     "DRREDDY": "881",
     "CIPLA": "694",
     "DIVISLAB": "10940",
     "APOLLOHOSP": "157",
+
+    # Energy & Power
     "RELIANCE": "2885",
     "ONGC": "2475",
     "NTPC": "11630",
     "POWERGRID": "14977",
     "COALINDIA": "20374",
     "BPCL": "526",
+
+    # Metals
     "TATASTEEL": "3499",
     "HINDALCO": "1363",
     "JSWSTEEL": "11723",
     "VEDL": "3063",
-    "HINDZINC": "1365",
+
+    # Others
     "BHARTIARTL": "3666",
     "TITAN": "3506",
     "ASIANPAINT": "212",
@@ -108,11 +133,12 @@ NIFTY50_STOCKS = {
     "LT": "11483",
     "ADANIENT": "25",
     "ADANIPORTS": "15083",
-    "INDUSINDBK": "5258",
-    "HEROMOTOCO": "1348",
 }
 
-# MIDCAP SAMPLE
+# ============================================
+# MIDCAP POPULAR STOCKS
+# ============================================
+
 MIDCAP_STOCKS = {
     "TATAPOWER": "3426",
     "GODREJCP": "10099",
@@ -123,7 +149,6 @@ MIDCAP_STOCKS = {
     "BANDHANBNK": "579",
     "LTTS": "11908",
     "POLYCAB": "9590",
-    "CONCOR": "14977",
     "ABCAPITAL": "5",
     "PNB": "10666",
     "CANBK": "10794",
@@ -131,7 +156,10 @@ MIDCAP_STOCKS = {
     "IDFCFIRSTB": "11184",
 }
 
-# Exchange segments
+# ============================================
+# Exchange Segments
+# ============================================
+
 EXCHANGE_SEGMENTS = {
     "NSE_EQ": "NSE Equity",
     "NSE_FNO": "NSE Derivatives (F&O)",
@@ -139,10 +167,18 @@ EXCHANGE_SEGMENTS = {
     "BSE_FNO": "BSE Derivatives",
     "MCX_COMM": "MCX Commodities",
     "NSE_CURRENCY": "NSE Currency",
+    "NSE_INDEX": "NSE Indices",
+    "BSE_INDEX": "BSE Indices",
 }
 
-# Helper
+# ============================================
+# Helper Functions
+# ============================================
+
 def get_security_id(symbol: str, stock_type: str = "nifty50") -> str:
+    """
+    Get security ID for a given symbol
+    """
     stock_lists = {
         "nifty50": NIFTY50_STOCKS,
         "midcap": MIDCAP_STOCKS,
@@ -152,8 +188,10 @@ def get_security_id(symbol: str, stock_type: str = "nifty50") -> str:
     stock_dict = stock_lists.get(stock_type.lower(), NIFTY50_STOCKS)
     return stock_dict.get(symbol.upper(), None)
 
+
 if __name__ == "__main__":
     print("Sample lookups:")
     print("RELIANCE ->", get_security_id("RELIANCE", "nifty50"))
     print("TCS ->", get_security_id("TCS", "nifty50"))
     print("NIFTY 50 ->", get_security_id("NIFTY 50", "indices_nse"))
+    print("BANKNIFTY ->", get_security_id("BANKNIFTY", "indices_nse"))
