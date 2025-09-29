@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-\"\"\"Simple DhanHQ -> Telegram LTP alert bot for Indian market.
+"""
+Simple DhanHQ -> Telegram LTP alert bot for Indian market.
 Polls every 60 seconds (configurable) and sends last price for configured symbols.
 
 Usage:
  - copy config.example.env -> .env and fill values, or set env vars directly
  - python3 bot.py
-\"\"\"
+"""
 
 import os
 import time
