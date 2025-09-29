@@ -86,12 +86,15 @@ def main():
         sys.exit(1)
 
     payload, display_map = {}, {}
+    resolved = []  # list of all (seg, sid, name)
+
     for s in SYMBOLS:
         ref = resolve_from_reference(s)
         if ref:
             seg, sid, name = ref
             payload.setdefault(seg, []).append(int(sid))
             display_map[(seg, str(sid))] = name
+            resolved.append((seg, str(sid), name))
             log.info(f"Resolved {s} -> {seg}:{sid}")
         else:
             log.warning(f"{s} not in reference dicts. Skipping.")
@@ -107,19 +110,26 @@ def main():
         try:
             data = call_ltp(payload).get("data", {})
             msgs = []
-            for seg, mapping in data.items():
-                for sid, info in mapping.items():
-                    lp = info.get("last_price")
-                    display = display_map.get((seg, str(sid)), f"{seg}:{sid}")
-                    prev = last_prices.get((seg, sid))
-                    change = ""
-                    if lp is not None and prev is not None:
+
+            # ensure all resolved symbols appear (even if missing in response)
+            for seg, sid, name in resolved:
+                mapping = data.get(seg, {})
+                info = mapping.get(sid, {})
+                lp = info.get("last_price")
+                display = display_map.get((seg, sid), f"{seg}:{sid}")
+                prev = last_prices.get((seg, sid))
+                change = ""
+
+                if lp is not None:
+                    if prev is not None:
                         diff = float(lp) - float(prev)
                         pct = (diff / float(prev)) * 100 if float(prev) != 0 else 0
                         change = f" ({diff:+.2f}, {pct:+.2f}%)"
-                    if lp is not None:
-                        msgs.append(f"<b>{display} ({seg})</b>: {lp}{change}")
-                        last_prices[(seg, sid)] = lp
+                    msgs.append(f"<b>{display} ({seg})</b>: {lp}{change}")
+                    last_prices[(seg, sid)] = lp
+                else:
+                    msgs.append(f"<b>{display} ({seg})</b>: (No Data)")
+
             if msgs:
                 text = f"<b>LTP Update • {now_ist_str()}</b>\n" + "\n".join(msgs)
                 send_telegram(text)
