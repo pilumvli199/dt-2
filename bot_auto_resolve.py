@@ -127,21 +127,26 @@ def main():
         try:
             data = call_ltp(payload).get("data", {})
 
-            # 🔥 OHLC fallback for missing
+            # 🔥 Collect all missing in one payload
+            missing_payload = {}
             for seg, sid, name in resolved:
-                mapping = data.get(seg, {})
-                info = mapping.get(sid, {})
+                info = data.get(seg, {}).get(sid, {})
                 if not info or "last_price" not in info:
-                    ohlc_data = call_ohlc({seg: [int(sid)]}).get("data", {})
-                    if seg in ohlc_data and sid in ohlc_data[seg]:
-                        lp = (
-                            ohlc_data[seg][sid].get("last_price")
-                            or ohlc_data[seg][sid].get("close")
-                        )
-                        if lp:
-                            if seg not in data:
-                                data[seg] = {}
-                            data[seg][sid] = {"last_price": lp}
+                    missing_payload.setdefault(seg, []).append(int(sid))
+
+            if missing_payload:
+                ohlc_data = call_ohlc(missing_payload).get("data", {})
+                for seg, sids in missing_payload.items():
+                    for sid in map(str, sids):
+                        if seg in ohlc_data and sid in ohlc_data[seg]:
+                            lp = (
+                                ohlc_data[seg][sid].get("last_price")
+                                or ohlc_data[seg][sid].get("close")
+                            )
+                            if lp:
+                                if seg not in data:
+                                    data[seg] = {}
+                                data[seg][sid] = {"last_price": lp}
 
             msgs = []
             for seg, sid, name in resolved:
