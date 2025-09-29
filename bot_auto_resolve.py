@@ -80,13 +80,29 @@ def call_ltp(payload):
         log.error(f"LTP call failed: {e}")
         return {}
 
+def call_ohlc(payload):
+    url = urljoin(DHAN_API_BASE + "/", "marketfeed/ohlc")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "access-token": DHAN_TOKEN,
+        "client-id": DHAN_CLIENT_ID,
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.error(f"OHLC call failed: {e}")
+        return {}
+
 def main():
     if not SYMBOLS:
         log.error("No SYMBOLS in .env file")
         sys.exit(1)
 
     payload, display_map = {}, {}
-    resolved = []  # list of all (seg, sid, name)
+    resolved = []  # (seg, sid, name)
 
     for s in SYMBOLS:
         ref = resolve_from_reference(s)
@@ -109,12 +125,23 @@ def main():
     while True:
         try:
             data = call_ltp(payload).get("data", {})
-            msgs = []
 
-            # ensure all resolved symbols appear (even if missing in response)
+            # 🔥 OHLC fallback for missing
             for seg, sid, name in resolved:
                 mapping = data.get(seg, {})
                 info = mapping.get(sid, {})
+                if not info or "last_price" not in info:
+                    ohlc_data = call_ohlc({seg: [int(sid)]}).get("data", {})
+                    if seg in ohlc_data and sid in ohlc_data[seg]:
+                        lp = ohlc_data[seg][sid].get("last_price")
+                        if lp:
+                            if seg not in data:
+                                data[seg] = {}
+                            data[seg][sid] = {"last_price": lp}
+
+            msgs = []
+            for seg, sid, name in resolved:
+                info = data.get(seg, {}).get(sid, {})
                 lp = info.get("last_price")
                 display = display_map.get((seg, sid), f"{seg}:{sid}")
                 prev = last_prices.get((seg, sid))
@@ -141,3 +168,6 @@ def main():
         except Exception as e:
             log.error(f"Loop error: {e}")
             time.sleep(5)
+
+if __name__ == "__main__":
+    main()
