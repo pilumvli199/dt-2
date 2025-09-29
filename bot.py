@@ -1,193 +1,225 @@
 #!/usr/bin/env python3
 """
-Simple DhanHQ -> Telegram LTP alert bot for Indian market.
-Polls every 60 seconds (configurable) and sends last price for configured symbols.
+DhanHQ polling -> Telegram LTP alerts
+- Polls instruments list to match symbols
+- Polls quote endpoint every 60s to get LTPs
+- Sends nicely formatted message to Telegram chat
 
-Usage:
- - copy config.example.env -> .env and fill values, or set env vars directly
- - python3 bot.py
+Environment variables required:
+- DHAN_TOKEN             (your Dhan API token)
+- TELEGRAM_BOT_TOKEN     (BotFather token)
+- TELEGRAM_CHAT_ID       (chat id or group id)
+Optional:
+- DHAN_API_BASE          (default: https://api.dhan.co/v2)
+- POLL_INTERVAL          (seconds, default: 60)
+- SYMBOLS_TO_TRACK       (comma separated symbols override default)
 """
 
 import os
 import time
 import json
-import csv
-import io
 import requests
-import hmac
-import hashlib
-from typing import List, Dict, Optional
+from datetime import datetime
 
-# --- Configuration (from env) ---
-SYMBOLS = [s.strip() for s in os.getenv('SYMBOLS', 'NIFTY,BANKNIFTY,SENSEX,RELIANCE,TCS,TATAMOTORS').split(',') if s.strip()]
-POLL_INTERVAL = int(os.getenv('POLL_INTERVAL_SECONDS', '60'))
-INSTRUMENTS_CSV_URL = os.getenv('INSTRUMENTS_CSV_URL', 'https://images.dhan.co/api-data/api-scrip-master.csv')
-MARKET_LTP_URL = os.getenv('MARKET_LTP_URL', 'https://api.dhan.co/marketfeed/ltp')
+# ---------------- CONFIG ----------------
+SYMBOLS_TO_TRACK = os.getenv("SYMBOLS_TO_TRACK", "NIFTY,BANKNIFTY,SENSEX,RELIANCE,TCS,TATAMOTORS").split(",")
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
 
-DHAN_API_TOKEN = os.getenv('DHAN_API_TOKEN')
-DHAN_API_SECRET = os.getenv('DHAN_API_SECRET')
-DHAN_AUTH_METHOD = os.getenv('DHAN_AUTH_METHOD', 'bearer').lower()  # 'bearer' or 'basic'
-DHAN_ADD_SECRET_HEADER = os.getenv('DHAN_ADD_SECRET_HEADER', '0') == '1'
-DHAN_CLIENT_ID = os.getenv('DHAN_CLIENT_ID', '').strip()
+DHAN_TOKEN = os.getenv("DHAN_TOKEN")
+DHAN_API_BASE = os.getenv("DHAN_API_BASE", "https://api.dhan.co/v2")
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- Helpers ---
-def compute_hmac_signature(secret: str, payload_bytes: bytes) -> str:
-    mac = hmac.new(secret.encode('utf-8'), payload_bytes, hashlib.sha256)
-    return mac.hexdigest()
+INSTRUMENTS_PATH = "/instruments"      # common Dhan path for instruments list
+QUOTE_PATH = "/market/quote"           # template quote path (may need edit for your API)
 
-def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
-    url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
-    try:
-        r = requests.post(url, json={'chat_id': chat_id, 'text': text}, timeout=10)
-        return r.ok
-    except Exception as e:
-        print('Telegram send error:', e)
-        return False
+if not DHAN_TOKEN:
+    raise SystemExit("Set DHAN_TOKEN environment variable.")
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise SystemExit("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.")
 
-def fetch_instruments_csv(csv_url: str) -> List[Dict[str,str]]:
-    r = requests.get(csv_url, timeout=20)
+HEADERS = {"Authorization": f"Bearer {DHAN_TOKEN}", "Content-Type": "application/json"}
+
+# ---------------- Helpers ----------------
+def fetch_instruments():
+    url = DHAN_API_BASE.rstrip("/") + INSTRUMENTS_PATH
+    r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    text = r.content.decode('utf-8', errors='ignore')
-    reader = csv.DictReader(io.StringIO(text))
-    return [row for row in reader]
+    return r.json()
 
-def find_tokens_for_symbols(rows: List[Dict[str,str]], symbols: List[str]) -> Dict[str, Optional[str]]:
-    cols = list(rows[0].keys()) if rows else []
-    # heuristics to find token and symbol columns
-    token_cols = [c for c in cols if c.lower() in ('token','instrument_token','securityid','security_id','id','instrumenttoken')]
-    symbol_cols = [c for c in cols if 'symbol' in c.lower() or 'tradingsymbol' in c.lower() or 'name' in c.lower()]
-    if not token_cols:
-        # pick numeric-like column
-        for c in cols:
-            sample = rows[0].get(c,'')
-            if sample.isdigit():
-                token_cols.append(c)
+def match_symbols(instruments, symbols):
+    mapping = {s: [] for s in symbols}
+    for instr in instruments:
+        # Some Dhan instrument objects use different keys; be flexible
+        trad = str(instr.get("tradingsymbol", "") or instr.get("instrument_name", "") or "").upper()
+        name = str(instr.get("instrument_name", "") or "").upper()
+        exch = str(instr.get("exchange", "") or "").upper()
+        for s in symbols:
+            if s.upper() in trad or s.upper() in name:
+                mapping[s].append(instr)
+            # also allow exact trading symbol match
+            if trad == s.upper():
+                mapping[s].append(instr)
+    return mapping
+
+def choose_best_match(matches):
+    chosen = {}
+    for s, list_matches in matches.items():
+        if not list_matches:
+            chosen[s] = None
+            continue
+        # prefer NSE/NFO or INDEX
+        pick = None
+        for m in list_matches:
+            exch = (m.get("exchange") or "").upper()
+            itype = (m.get("instrument_type") or m.get("segment") or "").upper()
+            if "NSE" in exch or "NFO" in exch or "INDEX" in itype:
+                pick = m
                 break
-    if not symbol_cols:
-        symbol_cols = cols[:2]
+        if not pick:
+            pick = list_matches[0]
+        chosen[s] = pick
+    return chosen
 
-    resolved = {}
-    for sym in symbols:
-        sym_up = sym.replace(' ','').upper()
-        found = None
-        for r in rows:
-            for sc in symbol_cols:
-                val = (r.get(sc,'') or '').upper().replace(' ','')
-                if val.startswith(sym_up) or val == sym_up or sym_up in val:
-                    for tc in token_cols:
-                        token = r.get(tc) or r.get(tc.lower()) or r.get(tc.upper())
-                        if token:
-                            found = token
-                            break
-                    if found:
-                        break
-            if found:
-                break
-        resolved[sym] = found
-    return resolved
+def save_json(obj, path):
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
 
-def fetch_ltp_for_tokens(tokens: List[str]) -> Dict[str, Optional[float]]:
-    if not tokens:
-        return {}
-    payload = {'instruments': tokens}
-    params = {}
-    if DHAN_CLIENT_ID:
-        params['clientId'] = DHAN_CLIENT_ID
-
-    headers = {'Content-Type': 'application/json'}
-    auth = None
-    if DHAN_API_TOKEN and DHAN_API_SECRET and DHAN_AUTH_METHOD == 'basic':
-        auth = (DHAN_API_TOKEN, DHAN_API_SECRET)
-    elif DHAN_API_TOKEN:
-        headers['Authorization'] = f'Bearer {DHAN_API_TOKEN}'
-        if DHAN_ADD_SECRET_HEADER and DHAN_API_SECRET:
-            headers['X-DHAN-API-SECRET'] = DHAN_API_SECRET
-
-    body_bytes = json.dumps(payload, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
-    if DHAN_API_SECRET:
-        headers['X-DHAN-SIGNATURE'] = compute_hmac_signature(DHAN_API_SECRET, body_bytes)
-
-    r = requests.post(MARKET_LTP_URL, headers=headers, params=params, json=payload, timeout=10, auth=auth)
-    r.raise_for_status()
-    data = r.json()
-
-    result = {}
-    if isinstance(data, dict):
-        if 'data' in data and isinstance(data['data'], list):
-            for item in data['data']:
-                token = item.get('token') or item.get('instrument') or item.get('tradingsymbol') or item.get('instrument_token')
-                ltp = item.get('ltp') or item.get('last_price') or item.get('lastTradedPrice')
-                if token is not None and ltp is not None:
-                    result[str(token)] = float(ltp)
-        else:
-            for k,v in data.items():
-                try:
-                    ltp = v.get('ltp') if isinstance(v, dict) else v
-                    result[str(k)] = float(ltp) if ltp is not None else None
-                except Exception:
-                    continue
-    elif isinstance(data, list):
-        for item in data:
-            token = item.get('token') or item.get('instrument')
-            ltp = item.get('ltp') or item.get('last_price')
-            if token and ltp is not None:
-                result[str(token)] = float(ltp)
-    return result
-
-def main():
-    if not (DHAN_API_TOKEN and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        print('ERROR: Set DHAN_API_TOKEN, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.')
-        return
-
-    print('Downloading instruments CSV ...')
-    try:
-        rows = fetch_instruments_csv(INSTRUMENTS_CSV_URL)
-    except Exception as e:
-        print('Failed to download instruments CSV:', e)
-        return
-
-    resolved = find_tokens_for_symbols(rows, SYMBOLS)
-    print('Resolved tokens:', resolved)
-
-    token_to_symbol = {}
-    for s,t in resolved.items():
-        if t:
-            token_to_symbol[str(t)] = s
-        else:
-            print(f'Warning: could not resolve symbol {s} in the instruments CSV. You may need to use exact trading symbol or security id.')
-
-    if not token_to_symbol:
-        print('No instruments resolved. Exiting.')
-        return
-
-    print(f'Starting polling every {POLL_INTERVAL} seconds. Press Ctrl+C to stop.')
-    try:
-        while True:
-            tokens = list(token_to_symbol.keys())
+def fetch_quote_for_token(token):
+    url = DHAN_API_BASE.rstrip("/") + QUOTE_PATH
+    # Try common param names
+    for param_name in ("instrumentToken", "instrument_token", "instrumentToken[]", "token"):
+        params = {param_name: token}
+        r = requests.get(url, headers=HEADERS, params=params, timeout=12)
+        if r.status_code == 200:
             try:
-                ltp_map = fetch_ltp_for_tokens(tokens)
-            except Exception as e:
-                print('Error fetching LTP:', e)
-                time.sleep(POLL_INTERVAL)
+                return r.json()
+            except Exception:
+                return r.text
+    # if none worked, raise
+    raise RuntimeError(f"Quote fetch failed for token {token} (checked common param names)")
+
+def extract_ltp(response):
+    """
+    Try to find LTP in response dict (common keys: last_price, ltp, lastPrice, lastTradedPrice)
+    If response is list/dict, search recursively.
+    """
+    keys = ["last_price", "ltp", "lastPrice", "last_traded_price", "lastTradedPrice", "ltpPrice"]
+    def deep_find(obj):
+        if isinstance(obj, dict):
+            for k in keys:
+                if k in obj and (obj[k] is not None):
+                    return obj[k]
+            for v in obj.values():
+                res = deep_find(v)
+                if res is not None:
+                    return res
+        elif isinstance(obj, list):
+            for item in obj:
+                res = deep_find(item)
+                if res is not None:
+                    return res
+        return None
+    return deep_find(response)
+
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    r = requests.post(url, json=payload, timeout=12)
+    if not r.ok:
+        print("Telegram send failed:", r.status_code, r.text)
+    return r.ok
+
+def nice_change_symbol(delta):
+    try:
+        d = float(delta)
+        if d > 0: return "🔺"
+        if d < 0: return "🔻"
+        return "⏺"
+    except Exception:
+        return ""
+
+# ---------------- Main ----------------
+def main():
+    print("Fetching instruments and matching symbols...")
+    insts = fetch_instruments()
+    matches = match_symbols(insts, SYMBOLS_TO_TRACK)
+    chosen = choose_best_match(matches)
+
+    # Save for user verification
+    save_json(chosen, "instruments.json")
+    print("Saved instruments.json — please inspect and correct instrument_token values if needed.")
+
+    # prepare tracked tokens
+    tracked = {}
+    for s, instr in chosen.items():
+        if not instr:
+            tracked[s] = None
+            continue
+        # possible keys for token
+        token = instr.get("instrument_token") or instr.get("instrumentToken") or instr.get("token") or instr.get("instrumentId") or instr.get("instrument_id")
+        tracked[s] = token
+
+    print("Tracking tokens (check instruments.json to confirm):")
+    for s, t in tracked.items():
+        print(f" - {s}: {t}")
+
+    prev_prices = {s: None for s in SYMBOLS_TO_TRACK}
+
+    while True:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"📡 <b>Market update</b> — {now}"]
+        for s in SYMBOLS_TO_TRACK:
+            token = tracked.get(s)
+            if not token:
+                lines.append(f"<b>{s}</b>: ❗ instrument token missing — edit instruments.json")
                 continue
-
-            parts = []
-            for token, sym in token_to_symbol.items():
-                ltp = ltp_map.get(str(token))
+            try:
+                q = fetch_quote_for_token(token)
+                ltp = extract_ltp(q)
                 if ltp is None:
-                    parts.append(f'{sym} ({token}): LTP unavailable')
+                    # save debug for inspection
+                    fname = f"debug_{token}.json"
+                    try:
+                        save_json(q, fname)
+                        lines.append(f"<b>{s}</b>: ❗ couldn't parse LTP (saved {fname})")
+                    except Exception:
+                        lines.append(f"<b>{s}</b>: ❗ couldn't parse LTP")
                 else:
-                    parts.append(f'{sym}: {ltp}')
-            msg = ' | '.join(parts)
-            ok = send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
-            now = time.strftime('%Y-%m-%d %H:%M:%S')
-            print(f'[{now}] Sent={ok} -> {msg}')
-            time.sleep(POLL_INTERVAL)
-    except KeyboardInterrupt:
-        print('Stopped by user.')
+                    # compute change from prev if available
+                    prev = prev_prices.get(s)
+                    delta = None
+                    pct = None
+                    try:
+                        cur = float(ltp)
+                        if prev is not None:
+                            delta = cur - prev
+                            pct = (delta / prev) * 100 if prev != 0 else None
+                        prev_prices[s] = cur
+                    except Exception:
+                        cur = ltp
+                    # format
+                    if delta is not None and pct is not None:
+                        sign = nice_change_symbol(delta)
+                        lines.append(f"<b>{s}</b>: {cur:.2f} {sign} <small>({delta:+.2f}, {pct:+.2f}%)</small>")
+                    else:
+                        lines.append(f"<b>{s}</b>: {cur}")
+            except Exception as e:
+                lines.append(f"<b>{s}</b>: error -> {e}")
 
-if __name__ == '__main__':
-    main()
+        message = "\n".join(lines)
+        # send (wrap in try to not crash)
+        try:
+            send_telegram(message)
+            print(f"[{datetime.now()}] Sent update to Telegram.")
+        except Exception as e:
+            print("Telegram send exception:", e)
+
+        time.sleep(POLL_INTERVAL)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Interrupted, exiting.")
