@@ -1,182 +1,122 @@
-# bot_auto_resolve.py
-import os, time, requests, sys, logging
-from dotenv import load_dotenv
-from urllib.parse import urljoin
-from datetime import datetime, timezone, timedelta
+import os
+import time
+import logging
+from datetime import datetime
+from dhanhq import marketfeed
+from telegram import Bot
 
-# Reference dicts
-try:
-    from dhanhq_security_ids import NIFTY50_STOCKS, INDICES_NSE, INDICES_BSE
-except ImportError:
-    print("⚠️ dhanhq_security_ids.py not found. Please keep it in the same folder.")
-    sys.exit(1)
+# ======================================
+# Setup Logging
+# ======================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+log = logging.getLogger(__name__)
 
-# --- Config ---
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("dhan-telegram-bot")
-
-DHAN_TOKEN = os.getenv("DHAN_TOKEN")
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# ======================================
+# ENV Vars (edit .env file)
+# ======================================
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+ACCESS_TOKEN = os.getenv("DHAN_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
-DHAN_API_BASE = os.getenv("DHAN_API_BASE", "https://api.dhan.co/v2")
 
-SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "").split(",") if s.strip()]
-
-if not DHAN_TOKEN or not DHAN_CLIENT_ID:
-    log.error("Missing DHAN_TOKEN or DHAN_CLIENT_ID in .env")
-    sys.exit(1)
-
-# Aliases
-ALIASES = {
-    "BANKNIFTY": "NIFTY BANK",
-    "NIFTYBANK": "NIFTY BANK",
-    "CNX NIFTY": "NIFTY 50",
+# ======================================
+# Symbols (Static Map for now)
+# ======================================
+SYMBOLS = {
+    "NIFTY 50": ("NSE_INDEX", "13"),
+    "NIFTY BANK": ("NSE_INDEX", "25"),
+    "SENSEX": ("BSE_INDEX", "51"),
+    "TATAMOTORS": ("NSE_EQ", "3456"),
+    "RELIANCE": ("NSE_EQ", "2885"),
+    "TCS": ("NSE_EQ", "11536"),
 }
 
-def now_ist_str():
-    ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    return ist.strftime("%Y-%m-%d %H:%M:%S IST")
+# ======================================
+# Telegram Bot Init
+# ======================================
+tg_bot = Bot(token=TELEGRAM_TOKEN)
 
-def send_telegram(text: str):
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        log.warning("Telegram creds missing, skipping message.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        log.error(f"Telegram send failed: {e}")
+# Hold latest LTP data
+latest_data = {name: None for name in SYMBOLS.keys()}
 
-def resolve_from_reference(symbol: str):
-    sym = symbol.upper()
-    if sym in ALIASES:
-        sym = ALIASES[sym]
 
-    if sym in INDICES_NSE:
-        return ("NSE_INDEX", INDICES_NSE[sym], sym)
-    if sym in INDICES_BSE:
-        return ("BSE_INDEX", INDICES_BSE[sym], sym)
-    if sym in NIFTY50_STOCKS:
-        return ("NSE_EQ", NIFTY50_STOCKS[sym], sym)
-    return None
-
-def call_ltp(payload):
-    url = urljoin(DHAN_API_BASE + "/", "marketfeed/ltp")
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "access-token": DHAN_TOKEN,
-        "client-id": DHAN_CLIENT_ID,
+# ======================================
+# Callback for WebSocket ticks
+# ======================================
+def on_tick(tick):
+    """
+    Tick Example:
+    {
+      'ExchangeSegment': 'NSE_EQ',
+      'SecurityId': '2885',
+      'LTP': 1375.55,
+      'Change': 0.25,
+      'PercentChange': 0.02
     }
+    """
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        r.raise_for_status()
-        return r.json()
+        seg = tick.get("ExchangeSegment")
+        sid = str(tick.get("SecurityId"))
+        ltp = tick.get("LTP")
+        chg = tick.get("Change")
+        pct = tick.get("PercentChange")
+
+        # Map back to symbol name
+        for name, (s, i) in SYMBOLS.items():
+            if s == seg and i == sid:
+                latest_data[name] = (ltp, chg, pct, seg)
+                break
     except Exception as e:
-        log.error(f"LTP call failed: {e}")
-        return {}
+        log.error(f"Tick processing error: {e}")
 
-def call_ohlc(payload):
-    url = urljoin(DHAN_API_BASE + "/", "marketfeed/ohlc")
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "access-token": DHAN_TOKEN,
-        "client-id": DHAN_CLIENT_ID,
-    }
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.error(f"OHLC call failed: {e}")
-        return {}
 
-def main():
-    if not SYMBOLS:
-        log.error("No SYMBOLS in .env file")
-        sys.exit(1)
+# ======================================
+# Telegram updater (every 1 min)
+# ======================================
+def send_update():
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+    msg_lines = [f"LTP Update • {now}"]
 
-    payload, display_map = {}, {}
-    resolved = []  # (seg, sid, name)
-
-    for s in SYMBOLS:
-        ref = resolve_from_reference(s)
-        if ref:
-            seg, sid, name = ref
-            payload.setdefault(seg, []).append(int(sid))
-            display_map[(seg, str(sid))] = name
-            resolved.append((seg, str(sid), name))
-            log.info(f"Resolved {s} -> {seg}:{sid}")
+    for name, val in latest_data.items():
+        if val is None:
+            msg_lines.append(f"{name}: (No Data)")
         else:
-            log.warning(f"{s} not in reference dicts. Skipping.")
+            ltp, chg, pct, seg = val
+            msg_lines.append(f"{name} ({seg}): {ltp} ({chg:+.2f}, {pct:+.2f}%)")
 
-    if not payload:
-        log.error("No valid symbols resolved. Exiting.")
-        sys.exit(1)
+    msg = "\n".join(msg_lines)
+    tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+    log.info("Telegram update sent.")
 
-    log.info(f"Final Payload: {payload}")
-    last_prices = {}
 
+# ======================================
+# Main
+# ======================================
+def main():
+    log.info("Starting WebSocket LTP Bot...")
+
+    # Prepare instruments for subscription
+    instruments = list(SYMBOLS.values())
+
+    # Setup feed
+    feed = marketfeed.DhanFeed(
+        client_id=CLIENT_ID,
+        access_token=ACCESS_TOKEN,
+        instruments=instruments,
+        subscription_code=marketfeed.Ticker,
+    )
+    feed.on_tick = on_tick
+    feed.connect()
+
+    # Run loop
     while True:
-        try:
-            data = call_ltp(payload).get("data", {})
+        send_update()
+        time.sleep(60)
 
-            # 🔥 Collect all missing in one payload
-            missing_payload = {}
-            for seg, sid, name in resolved:
-                info = data.get(seg, {}).get(sid, {})
-                if not info or "last_price" not in info:
-                    missing_payload.setdefault(seg, []).append(int(sid))
-
-            if missing_payload:
-                ohlc_data = call_ohlc(missing_payload).get("data", {})
-                for seg, sids in missing_payload.items():
-                    for sid in map(str, sids):
-                        if seg in ohlc_data and sid in ohlc_data[seg]:
-                            lp = (
-                                ohlc_data[seg][sid].get("last_price")
-                                or ohlc_data[seg][sid].get("close")
-                            )
-                            if lp:
-                                if seg not in data:
-                                    data[seg] = {}
-                                data[seg][sid] = {"last_price": lp}
-
-            msgs = []
-            for seg, sid, name in resolved:
-                info = data.get(seg, {}).get(sid, {})
-                lp = info.get("last_price")
-                display = display_map.get((seg, sid), f"{seg}:{sid}")
-                prev = last_prices.get((seg, sid))
-                change = ""
-
-                if lp is not None:
-                    if prev is not None:
-                        diff = float(lp) - float(prev)
-                        pct = (diff / float(prev)) * 100 if float(prev) != 0 else 0
-                        change = f" ({diff:+.2f}, {pct:+.2f}%)"
-                    msgs.append(f"<b>{display} ({seg})</b>: {lp}{change}")
-                    last_prices[(seg, sid)] = lp
-                else:
-                    msgs.append(f"<b>{display} ({seg})</b>: (No Data)")
-
-            if msgs:
-                text = f"<b>LTP Update • {now_ist_str()}</b>\n" + "\n".join(msgs)
-                send_telegram(text)
-                log.info("Sent update with %d items", len(msgs))
-            time.sleep(POLL_INTERVAL)
-        except KeyboardInterrupt:
-            log.info("Stopped by user")
-            break
-        except Exception as e:
-            log.error(f"Loop error: {e}")
-            time.sleep(5)
 
 if __name__ == "__main__":
     main()
