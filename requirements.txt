@@ -1,5 +1,11 @@
-requests==2.31.0
-python-dotenv==1.0.0
-websocket-client==1.6.3
-dhanhq
+# Core
+dhanhq==1.0.16        # official DhanHQ Python SDK
 python-telegram-bot==13.15
+
+# Fix for Python 3.13 (stdlib मधून काढलेलं)
+imghdr-py==0.3
+
+# Utils
+requests==2.32.3
+pandas==2.2.3
+python-dotenv==1.0.1
