@@ -1,5 +1,5 @@
 # Core
-dhanhq==1.0.16        # official DhanHQ Python SDK
+dhanhq==2.0.2         # official DhanHQ Python SDK (latest)
 python-telegram-bot==13.15
 
 # Fix for Python 3.13 (stdlib मधून काढलेलं)
